@@ -1,0 +1,11 @@
+version: '3'
+services:
+  relay:
+    build: .
+    volumes:
+      - ./data:/mnt/
+    ports:
+      - 8080:8080
+    environment:
+      - HOSTNAME=relay.04.si
+    restart: always
