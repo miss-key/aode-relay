@@ -4,11 +4,12 @@
 use activitystreams::iri_string::types::IriString;
 use actix_rt::task::JoinHandle;
 use actix_web::{middleware::Compress, web, App, HttpServer};
-use collector::{DoubleRecorder, MemoryCollector};
+use collector::MemoryCollector;
 #[cfg(feature = "console")]
 use console_subscriber::ConsoleLayer;
 use http_signature_normalization_actix::middleware::VerifySignature;
 use metrics_exporter_prometheus::PrometheusBuilder;
+use metrics_util::layers::FanoutBuilder;
 use opentelemetry::{sdk::Resource, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
 use rustls::ServerConfig;
@@ -119,7 +120,11 @@ async fn main() -> Result<(), anyhow::Error> {
             .build()?;
 
         actix_rt::spawn(exporter);
-        DoubleRecorder::new(recorder, collector.clone()).install()?;
+        let recorder = FanoutBuilder::default()
+            .add_recorder(recorder)
+            .add_recorder(collector.clone())
+            .build();
+        metrics::set_boxed_recorder(Box::new(recorder))?;
     } else {
         collector.install()?;
     }
@@ -143,7 +148,7 @@ fn client_main(config: Config, args: Args) -> JoinHandle<Result<(), anyhow::Erro
 }
 
 async fn do_client_main(config: Config, args: Args) -> Result<(), anyhow::Error> {
-    let client = requests::build_client(&config.user_agent());
+    let client = requests::build_client(&config.user_agent(), config.client_pool_size());
 
     if !args.blocks().is_empty() || !args.allowed().is_empty() {
         if args.undo() {
@@ -241,10 +246,6 @@ async fn do_server_main(
     tracing::warn!("Creating state");
     let state = State::build(db.clone()).await?;
 
-    tracing::warn!("Creating workers");
-    let (manager, job_server) =
-        create_workers(state.clone(), actors.clone(), media.clone(), config.clone());
-
     if let Some((token, admin_handle)) = config.telegram_info() {
         tracing::warn!("Creating telegram handler");
         telegram::start(admin_handle.to_owned(), db.clone(), token);
@@ -254,13 +255,18 @@ async fn do_server_main(
 
     let bind_address = config.bind_address();
     let server = HttpServer::new(move || {
+        let requests = state.requests(&config);
+
+        let job_server =
+            create_workers(state.clone(), actors.clone(), media.clone(), config.clone());
+
         let app = App::new()
             .app_data(web::Data::new(db.clone()))
             .app_data(web::Data::new(state.clone()))
-            .app_data(web::Data::new(state.requests(&config)))
+            .app_data(web::Data::new(requests.clone()))
             .app_data(web::Data::new(actors.clone()))
             .app_data(web::Data::new(config.clone()))
-            .app_data(web::Data::new(job_server.clone()))
+            .app_data(web::Data::new(job_server))
             .app_data(web::Data::new(media.clone()))
             .app_data(web::Data::new(collector.clone()));
 
@@ -280,7 +286,7 @@ async fn do_server_main(
                 web::resource("/inbox")
                     .wrap(config.digest_middleware())
                     .wrap(VerifySignature::new(
-                        MyVerify(state.requests(&config), actors.clone(), state.clone()),
+                        MyVerify(requests, actors.clone(), state.clone()),
                         Default::default(),
                     ))
                     .wrap(DebugPayload(config.debug()))
@@ -328,10 +334,6 @@ async fn do_server_main(
     }
 
     tracing::warn!("Server closed");
-
-    drop(manager);
-
-    tracing::warn!("Main complete");
 
     Ok(())
 }
