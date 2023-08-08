@@ -17,7 +17,6 @@ services:
       - PUBLISH_BLOCKS=true
       - SLED_PATH=/mnt/sled/db-0.34
       - RUST_LOG=warn
-      - SOURCE_REPO="https://github.com/miss-key/aode-relay"
       - LOCAL_DOMAINS=misskey.gg
       - LOCAL_BLURB="<p>This server is running stably in the Japanese cloud.</p>"
     restart: always
